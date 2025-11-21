@@ -13,66 +13,48 @@ NETEASE_API_BASE = "https://music.ccyacg.xyz"
 MY_API_KEY = "114514" 
 # ===========================================
 
-# --- 统一响应格式 (已添加响应日志) ---
+# --- 统一响应格式 ---
 def response_json(data=None, code=200, msg="操作成功"):
-    # 1. 先构造要返回的字典
     resp_dict = {
         "code": code,
         "message": msg, 
         "data": data
     }
-
-    # 2. === 打印响应日志 ===
+    # 打印响应日志
     try:
         print("\n" + "="*30 + " SENDING RESPONSE " + "="*30)
         print(f"[Status Code]: {code}")
-        
-        # 尝试将返回内容转为字符串打印，方便调试
-        # ensure_ascii=False 让中文正常显示
-        # default=str 防止某些特殊对象无法序列化导致日志报错
         log_content = json.dumps(resp_dict, ensure_ascii=False, default=str)
-        
-        # 如果日志太长（比如返回了歌单列表），只截取前1000个字符，避免日志爆炸
         if len(log_content) > 1000:
-            print(f"[Body (Truncated)]: {log_content[:1000]}... (Total Length: {len(log_content)})")
+            print(f"[Body (Truncated)]: {log_content[:1000]}...")
         else:
             print(f"[Body]: {log_content}")
-            
         print("="*78 + "\n")
-    except Exception as log_err:
-        # 即使日志打印失败，也不要影响正常返回
-        print(f"!!! 日志打印失败: {log_err}")
-
-    # 3. 正常返回给客户端
+    except Exception:
+        pass
     return jsonify(resp_dict)
-
 
 # --- 调试辅助：请求日志 ---
 def log_request_debug():
     print("\n" + "="*30 + " NEW REQUEST " + "="*30)
     print(f"[Path]: {request.path}")
     print(f"[Method]: {request.method}")
-    print(f"[Headers]:\n{request.headers}")
+    # print(f"[Headers]:\n{request.headers}") # 嫌日志太长可以注释掉Header
     raw_data = request.get_data(as_text=True)
     print(f"[Raw Body String]: {raw_data}")
     print("="*73 + "\n")
-
 
 # --- 中间件：ApiKey 验证 ---
 def require_apikey(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
-        log_request_debug() # 进门先记录
-
+        log_request_debug()
         if not MY_API_KEY:
             return f(*args, **kwargs)
-
         request_key = request.headers.get('ApiKey')
-        
         if request_key != MY_API_KEY:
-             print(f"!!! API Key 验证失败. 期望: {MY_API_KEY}, 实际收到: {request_key}")
-             return response_json(code=400, msg=f"API Key 无效或缺失. Receive: {request_key}")
-        
+             print(f"!!! API Key 验证失败. Receive: {request_key}")
+             return response_json(code=400, msg=f"API Key 无效. Receive: {request_key}")
         return f(*args, **kwargs)
     return decorated
 
@@ -83,19 +65,17 @@ def require_apikey(f):
 def search_music_list():
     try:
         print(">>> [Logic] 开始解析参数...")
-        
-        # 强力解析 JSON 或 Form
-        payload = request.get_json(force=True, silent=True) or request.values.to_dict()
-        
-        # 如果 payload 还是 None（极其罕见），给个空字典
-        if payload is None:
-            payload = {}
-            
+        payload = request.get_json(force=True, silent=True) or request.values.to_dict() or {}
         print(f">>> [Logic] 解析到的 Payload: {payload}")
 
-        keyword = payload.get('Keyword')
-        page = payload.get('Page', 1)
+        # === 修复点 1: 兼容大小写 ===
+        # 优先找 'Keyword', 找不到就找 'keyword'
+        keyword = payload.get('Keyword') or payload.get('keyword')
         
+        # 优先找 'Page', 找不到就找 'page', 实在没有默认为 1
+        page = payload.get('Page') or payload.get('page') or 1
+        # ==========================
+
         if not keyword:
             return response_json(code=400, msg="参数 Keyword 不能为空")
 
@@ -106,7 +86,7 @@ def search_music_list():
             offset = 0
 
         target_url = f"{NETEASE_API_BASE}/cloudsearch"
-        print(f">>> [Logic] 请求网易云接口: {target_url}")
+        # print(f">>> [Logic] 请求网易云接口: {target_url}")
         
         resp = requests.get(target_url, params={
             "keywords": keyword,
@@ -127,8 +107,6 @@ def search_music_list():
                     "singer": song['ar'][0]['name'] if song.get('ar') else "Unknown",
                     "id": str(song['id'])
                 })
-        else:
-            print(f"!!! [Logic] 网易云接口返回非200或无结果: {n_data}")
 
         return response_json(data=results)
 
@@ -142,9 +120,10 @@ def search_music_list():
 @require_apikey
 def get_music_detail():
     try:
-        print(f">>> [Logic] GetMusicDetail Params: {request.args}")
+        # GET 请求不需要改，因为 request.args 不区分大小写吗？不，通常 URL 参数也区分
+        # 为了保险，这里也改一下
+        song_id = request.args.get('id') or request.args.get('Id') or request.args.get('ID')
         
-        song_id = request.args.get('id')
         if not song_id:
             return response_json(code=400, msg="参数 id 不能为空")
 
@@ -188,10 +167,11 @@ def search_recommended():
     try:
         print(">>> [Logic] 进入推荐搜索...")
         payload = request.get_json(force=True, silent=True) or request.values.to_dict() or {}
-        print(f">>> [Logic] 推荐 Payload: {payload}")
 
-        keyword = payload.get('Keyword')
-        size = payload.get('size', 10)
+        # === 修复点 2: 兼容大小写 ===
+        keyword = payload.get('Keyword') or payload.get('keyword')
+        size = payload.get('size') or payload.get('Size') or 10
+        # ==========================
 
         if not keyword:
             return response_json(code=400, msg="参数 Keyword 不能为空")
