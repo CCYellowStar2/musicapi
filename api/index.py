@@ -19,7 +19,6 @@ MY_API_KEY = "114514"
 def response_json(data=None, code=200, msg="操作成功"):
     return jsonify({
         "code": code,
-        "message": msg, 
         "data": data
     })
 
@@ -46,7 +45,7 @@ def require_apikey(f):
 @require_apikey
 def search_music_list():
     try:
-        payload = request.json or {}
+        payload = request.get_json(force=True, silent=True) or request.values or {}
         keyword = payload.get('Keyword')
         page = payload.get('Page', 1)
         
@@ -142,7 +141,7 @@ def get_music_detail():
 @require_apikey
 def search_recommended():
     try:
-        payload = request.json or {}
+        payload = request.get_json(force=True, silent=True) or request.values or {}
         keyword = payload.get('Keyword')
         size = payload.get('size', 10)
 
