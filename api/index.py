@@ -12,7 +12,7 @@ CORS(app)
 NETEASE_API_BASE = "https://music.ccyacg.xyz"
 
 # 2. 你的 API Key (对应文档中的 ApiKey)
-MY_API_KEY = None 
+MY_API_KEY = "114514" 
 # ===========================================
 
 # --- 统一响应格式 ---
