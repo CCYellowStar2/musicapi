@@ -93,17 +93,27 @@ def get_music_detail():
         if not song_id:
             return response_json(code=400, msg="参数 id 不能为空")
 
-        # A: 获取播放链接
-        url_api = f"{NETEASE_API_BASE}/song/url/v1"
-        # 尝试 standard, exhigh, lossless, hires
-        url_resp = requests.get(url_api, params={"id": song_id, "level": "exhigh"})
-        url_data = url_resp.json()
+        # --- A: 解析真实播放链接 (Server-side Redirect Resolution) ---
+        # 构造第三方解析地址
+        target_url = f"https://music.163.com/song?id={song_id}"
+        redirect_api = f"https://biliplayer.91vrchat.com/player/?url={target_url}"
         
-        music_url = ""
-        if url_data.get('code') == 200 and url_data.get('data'):
-            music_url = url_data['data'][0].get('url')
+        real_url = ""
+        try:
+            # stream=True 关键！只获取 Header 和 最终 URL，不下载音频文件
+            # allow_redirects=True 默认就是 True，这里显式写出来表示我们依赖它
+            r = requests.get(redirect_api, allow_redirects=True, stream=True, timeout=10)
+            
+            # requests 会自动跟随跳转，r.url 就是最终的直链地址
+            real_url = r.url
+            
+            # 立即关闭连接，节省资源
+            r.close() 
+        except Exception as url_err:
+            print(f"解析链接失败: {url_err}")
+            # 如果解析失败，real_url 为空，后面会返回错误或尝试备用方案
 
-        # B: 获取歌词
+        # --- B: 获取歌词 (保持原逻辑) ---
         lrc_api = f"{NETEASE_API_BASE}/lyric"
         lrc_resp = requests.get(lrc_api, params={"id": song_id})
         lrc_data = lrc_resp.json()
@@ -112,11 +122,13 @@ def get_music_detail():
         if lrc_data.get('code') == 200:
             lyric_text = lrc_data.get('lrc', {}).get('lyric', "")
 
-        if not music_url:
-             return response_json(code=400, msg="无法获取播放链接(可能需要VIP)")
+        # --- 检查结果 ---
+        if not real_url or "biliplayer" in real_url: 
+            # 如果 url 还是原来那个，说明没跳转成功，或者解析失败
+            return response_json(code=400, msg="无法解析歌曲直链，请重试")
 
         return response_json(data={
-            "url": music_url,
+            "url": real_url,  # 这里返回的是解析后的最终直链
             "lyric": lyric_text,
             "id": song_id
         })
