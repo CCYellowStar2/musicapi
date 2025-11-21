@@ -12,7 +12,7 @@ CORS(app)
 NETEASE_API_BASE = "https://music.ccyacg.xyz"
 
 # 2. 你的 API Key (对应文档中的 ApiKey)
-MY_API_KEY = "1234567890" 
+MY_API_KEY = None 
 # ===========================================
 
 # --- 统一响应格式 ---
@@ -27,10 +27,15 @@ def response_json(data=None, code=200, msg="操作成功"):
 def require_apikey(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
+        # 如果管理员没有设置密码 (None)，则直接放行，方便测试
+        if not MY_API_KEY:
+            return f(*args, **kwargs)
+
+        # 如果设置了密码，则开始检查
         request_key = request.headers.get('ApiKey')
-        # 如果配置了 Key 且请求没带，或者不对
-        if MY_API_KEY and request_key != MY_API_KEY:
+        if request_key != MY_API_KEY:
              return response_json(code=400, msg="API Key 无效或缺失")
+        
         return f(*args, **kwargs)
     return decorated
 
