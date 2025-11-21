@@ -2,16 +2,14 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import functools
+import traceback # 引入这个用于打印详细报错堆栈
+import json
 
 app = Flask(__name__)
-# 开启跨域支持 (文档中提到建议支持 CORS)
 CORS(app)
 
 # ================= 配置区域 =================
-# 1. 你的网易云 API 地址 (已修改为你提供的 Vercel 地址)
 NETEASE_API_BASE = "https://music.ccyacg.xyz"
-
-# 2. 你的 API Key (对应文档中的 ApiKey)
 MY_API_KEY = "114514" 
 # ===========================================
 
@@ -19,45 +17,83 @@ MY_API_KEY = "114514"
 def response_json(data=None, code=200, msg="操作成功"):
     return jsonify({
         "code": code,
-        "message":msg,
+        "message": msg, 
         "data": data
     })
+
+# --- 日志辅助函数 ---
+def log_request_debug():
+    """打印请求的详细信息，用于排查机器人发了什么"""
+    print("\n" + "="*30 + " NEW REQUEST " + "="*30)
+    print(f"[Path]: {request.path}")
+    print(f"[Method]: {request.method}")
+    print(f"[Headers]:\n{request.headers}")
+    # 获取原始数据字符串
+    raw_data = request.get_data(as_text=True)
+    print(f"[Raw Body String]: {raw_data}")
+    print("="*73 + "\n")
 
 # --- 中间件：ApiKey 验证 ---
 def require_apikey(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
-        # 如果管理员没有设置密码 (None)，则直接放行，方便测试
+        # 1. 先打印日志，不管有没有 Key
+        log_request_debug()
+
         if not MY_API_KEY:
             return f(*args, **kwargs)
 
-        # 如果设置了密码，则开始检查
         request_key = request.headers.get('ApiKey')
+        
+        # 调试日志：看看机器人到底发没发 Key
         if request_key != MY_API_KEY:
-             return response_json(code=400, msg="API Key 无效或缺失")
+             print(f"!!! API Key 验证失败. 期望: {MY_API_KEY}, 实际收到: {request_key}")
+             return response_json(code=400, msg=f"API Key 无效或缺失. Receive: {request_key}")
         
         return f(*args, **kwargs)
     return decorated
 
 # ================= 接口实现 =================
 
-# 1. 搜索接口 (POST) /SearchMusicList
 @app.route('/SearchMusicList', methods=['POST'])
 @require_apikey
 def search_music_list():
     try:
-        payload = request.get_json(force=True, silent=True) or request.values or {}
+        # === 核心修改：强力解析 + 详细日志 ===
+        print(">>> 正在尝试解析参数...")
+        
+        # 1. 尝试强制解析 JSON (silent=True 不报错, force=True 无视 Content-Type)
+        payload = request.get_json(force=True, silent=True)
+        
+        # 2. 如果解析失败，尝试回退到 form-data 或 args
+        if not payload:
+            print(">>> get_json 返回空，尝试读取 request.values (Form/Args)...")
+            payload = request.values.to_dict()
+        
+        print(f">>> 最终解析到的 Payload: {payload} (Type: {type(payload)})")
+        
+        # 防御性编程：确保 payload 是字典
+        if not isinstance(payload, dict):
+             payload = {}
+
         keyword = payload.get('Keyword')
         page = payload.get('Page', 1)
         
+        print(f">>> 提取参数: Keyword={keyword}, Page={page}")
+
         if not keyword:
-            return response_json(code=400, msg="参数 Keyword 不能为空")
+            return response_json(code=400, msg="参数 Keyword 不能为空 (解析后为 None)")
 
         limit = 20
-        offset = (int(page) - 1) * limit
+        # 确保 page 是 int
+        try:
+            offset = (int(page) - 1) * limit
+        except ValueError:
+            offset = 0
 
-        # 调用你的网易云 Vercel 服务
         target_url = f"{NETEASE_API_BASE}/cloudsearch"
+        print(f">>> 请求网易云接口: {target_url}")
+        
         resp = requests.get(target_url, params={
             "keywords": keyword,
             "limit": limit,
@@ -77,43 +113,40 @@ def search_music_list():
                     "singer": song['ar'][0]['name'] if song.get('ar') else "Unknown",
                     "id": str(song['id'])
                 })
+        else:
+             print(f"!!! 网易云返回异常: {n_data}")
 
         return response_json(data=results)
 
     except Exception as e:
+        # 打印详细的报错堆栈，不仅仅是错误信息
+        error_trace = traceback.format_exc()
+        print(f"!!! 发生严重错误:\n{error_trace}")
         return response_json(code=500, msg=f"Server Error: {str(e)}")
 
 
-# 2. 获取详情接口 (GET) /GetMusicDetail
 @app.route('/GetMusicDetail', methods=['GET'])
 @require_apikey
 def get_music_detail():
     try:
+        # GET 请求也要看参数
+        print(f">>> GetMusicDetail Params: {request.args}")
+        
         song_id = request.args.get('id')
         if not song_id:
             return response_json(code=400, msg="参数 id 不能为空")
 
-        # --- A: 解析真实播放链接 (Server-side Redirect Resolution) ---
-        # 构造第三方解析地址
         target_url = f"https://music.163.com/song?id={song_id}"
         redirect_api = f"https://biliplayer.91vrchat.com/player/?url={target_url}"
         
         real_url = ""
         try:
-            # stream=True 关键！只获取 Header 和 最终 URL，不下载音频文件
-            # allow_redirects=True 默认就是 True，这里显式写出来表示我们依赖它
             r = requests.get(redirect_api, allow_redirects=True, stream=True, timeout=10)
-            
-            # requests 会自动跟随跳转，r.url 就是最终的直链地址
             real_url = r.url
-            
-            # 立即关闭连接，节省资源
             r.close() 
         except Exception as url_err:
-            print(f"解析链接失败: {url_err}")
-            # 如果解析失败，real_url 为空，后面会返回错误或尝试备用方案
+            print(f"!!! 解析链接失败: {url_err}")
 
-        # --- B: 获取歌词 (保持原逻辑) ---
         lrc_api = f"{NETEASE_API_BASE}/lyric"
         lrc_resp = requests.get(lrc_api, params={"id": song_id})
         lrc_data = lrc_resp.json()
@@ -122,27 +155,29 @@ def get_music_detail():
         if lrc_data.get('code') == 200:
             lyric_text = lrc_data.get('lrc', {}).get('lyric', "")
 
-        # --- 检查结果 ---
         if not real_url or "biliplayer" in real_url: 
-            # 如果 url 还是原来那个，说明没跳转成功，或者解析失败
             return response_json(code=400, msg="无法解析歌曲直链，请重试")
 
         return response_json(data={
-            "url": real_url,  # 这里返回的是解析后的最终直链
+            "url": real_url,
             "lyric": lyric_text,
             "id": song_id
         })
 
     except Exception as e:
+        error_trace = traceback.format_exc()
+        print(f"!!! GetMusicDetail Error:\n{error_trace}")
         return response_json(code=500, msg=str(e))
 
-
-# 3. 推荐搜索接口 (POST) /SearchMusicRecommendedList
 @app.route('/SearchMusicRecommendedList', methods=['POST'])
 @require_apikey
 def search_recommended():
     try:
-        payload = request.get_json(force=True, silent=True) or request.values or {}
+        print(">>> 进入推荐搜索...")
+        # 同样应用强力解析
+        payload = request.get_json(force=True, silent=True) or request.values.to_dict() or {}
+        print(f">>> 推荐 Payload: {payload}")
+
         keyword = payload.get('Keyword')
         size = payload.get('size', 10)
 
@@ -172,8 +207,9 @@ def search_recommended():
         return response_json(data=results)
 
     except Exception as e:
+        error_trace = traceback.format_exc()
+        print(f"!!! SearchMusicRecommendedList Error:\n{error_trace}")
         return response_json(code=500, msg=str(e))
 
-# Vercel 需要这个 app 对象，但不需要 app.run()
 # if __name__ == '__main__':
-#    app.run()
+#    app.run(debug=True, port=5000)
