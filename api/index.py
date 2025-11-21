@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import functools
-import traceback # 引入这个用于打印详细报错堆栈
+import traceback
 import json
 
 app = Flask(__name__)
@@ -13,39 +13,62 @@ NETEASE_API_BASE = "https://music.ccyacg.xyz"
 MY_API_KEY = "114514" 
 # ===========================================
 
-# --- 统一响应格式 ---
+# --- 统一响应格式 (已添加响应日志) ---
 def response_json(data=None, code=200, msg="操作成功"):
-    return jsonify({
+    # 1. 先构造要返回的字典
+    resp_dict = {
         "code": code,
         "message": msg, 
         "data": data
-    })
+    }
 
-# --- 日志辅助函数 ---
+    # 2. === 打印响应日志 ===
+    try:
+        print("\n" + "="*30 + " SENDING RESPONSE " + "="*30)
+        print(f"[Status Code]: {code}")
+        
+        # 尝试将返回内容转为字符串打印，方便调试
+        # ensure_ascii=False 让中文正常显示
+        # default=str 防止某些特殊对象无法序列化导致日志报错
+        log_content = json.dumps(resp_dict, ensure_ascii=False, default=str)
+        
+        # 如果日志太长（比如返回了歌单列表），只截取前1000个字符，避免日志爆炸
+        if len(log_content) > 1000:
+            print(f"[Body (Truncated)]: {log_content[:1000]}... (Total Length: {len(log_content)})")
+        else:
+            print(f"[Body]: {log_content}")
+            
+        print("="*78 + "\n")
+    except Exception as log_err:
+        # 即使日志打印失败，也不要影响正常返回
+        print(f"!!! 日志打印失败: {log_err}")
+
+    # 3. 正常返回给客户端
+    return jsonify(resp_dict)
+
+
+# --- 调试辅助：请求日志 ---
 def log_request_debug():
-    """打印请求的详细信息，用于排查机器人发了什么"""
     print("\n" + "="*30 + " NEW REQUEST " + "="*30)
     print(f"[Path]: {request.path}")
     print(f"[Method]: {request.method}")
     print(f"[Headers]:\n{request.headers}")
-    # 获取原始数据字符串
     raw_data = request.get_data(as_text=True)
     print(f"[Raw Body String]: {raw_data}")
     print("="*73 + "\n")
+
 
 # --- 中间件：ApiKey 验证 ---
 def require_apikey(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
-        # 1. 先打印日志，不管有没有 Key
-        log_request_debug()
+        log_request_debug() # 进门先记录
 
         if not MY_API_KEY:
             return f(*args, **kwargs)
 
         request_key = request.headers.get('ApiKey')
         
-        # 调试日志：看看机器人到底发没发 Key
         if request_key != MY_API_KEY:
              print(f"!!! API Key 验证失败. 期望: {MY_API_KEY}, 实际收到: {request_key}")
              return response_json(code=400, msg=f"API Key 无效或缺失. Receive: {request_key}")
@@ -59,40 +82,31 @@ def require_apikey(f):
 @require_apikey
 def search_music_list():
     try:
-        # === 核心修改：强力解析 + 详细日志 ===
-        print(">>> 正在尝试解析参数...")
+        print(">>> [Logic] 开始解析参数...")
         
-        # 1. 尝试强制解析 JSON (silent=True 不报错, force=True 无视 Content-Type)
-        payload = request.get_json(force=True, silent=True)
+        # 强力解析 JSON 或 Form
+        payload = request.get_json(force=True, silent=True) or request.values.to_dict()
         
-        # 2. 如果解析失败，尝试回退到 form-data 或 args
-        if not payload:
-            print(">>> get_json 返回空，尝试读取 request.values (Form/Args)...")
-            payload = request.values.to_dict()
-        
-        print(f">>> 最终解析到的 Payload: {payload} (Type: {type(payload)})")
-        
-        # 防御性编程：确保 payload 是字典
-        if not isinstance(payload, dict):
-             payload = {}
+        # 如果 payload 还是 None（极其罕见），给个空字典
+        if payload is None:
+            payload = {}
+            
+        print(f">>> [Logic] 解析到的 Payload: {payload}")
 
         keyword = payload.get('Keyword')
         page = payload.get('Page', 1)
         
-        print(f">>> 提取参数: Keyword={keyword}, Page={page}")
-
         if not keyword:
-            return response_json(code=400, msg="参数 Keyword 不能为空 (解析后为 None)")
+            return response_json(code=400, msg="参数 Keyword 不能为空")
 
         limit = 20
-        # 确保 page 是 int
         try:
             offset = (int(page) - 1) * limit
         except ValueError:
             offset = 0
 
         target_url = f"{NETEASE_API_BASE}/cloudsearch"
-        print(f">>> 请求网易云接口: {target_url}")
+        print(f">>> [Logic] 请求网易云接口: {target_url}")
         
         resp = requests.get(target_url, params={
             "keywords": keyword,
@@ -114,14 +128,13 @@ def search_music_list():
                     "id": str(song['id'])
                 })
         else:
-             print(f"!!! 网易云返回异常: {n_data}")
+            print(f"!!! [Logic] 网易云接口返回非200或无结果: {n_data}")
 
         return response_json(data=results)
 
     except Exception as e:
-        # 打印详细的报错堆栈，不仅仅是错误信息
         error_trace = traceback.format_exc()
-        print(f"!!! 发生严重错误:\n{error_trace}")
+        print(f"!!! [Error] SearchMusicList 崩溃:\n{error_trace}")
         return response_json(code=500, msg=f"Server Error: {str(e)}")
 
 
@@ -129,8 +142,7 @@ def search_music_list():
 @require_apikey
 def get_music_detail():
     try:
-        # GET 请求也要看参数
-        print(f">>> GetMusicDetail Params: {request.args}")
+        print(f">>> [Logic] GetMusicDetail Params: {request.args}")
         
         song_id = request.args.get('id')
         if not song_id:
@@ -145,7 +157,7 @@ def get_music_detail():
             real_url = r.url
             r.close() 
         except Exception as url_err:
-            print(f"!!! 解析链接失败: {url_err}")
+            print(f"!!! [Error] 解析直链失败: {url_err}")
 
         lrc_api = f"{NETEASE_API_BASE}/lyric"
         lrc_resp = requests.get(lrc_api, params={"id": song_id})
@@ -166,17 +178,17 @@ def get_music_detail():
 
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"!!! GetMusicDetail Error:\n{error_trace}")
+        print(f"!!! [Error] GetMusicDetail 崩溃:\n{error_trace}")
         return response_json(code=500, msg=str(e))
+
 
 @app.route('/SearchMusicRecommendedList', methods=['POST'])
 @require_apikey
 def search_recommended():
     try:
-        print(">>> 进入推荐搜索...")
-        # 同样应用强力解析
+        print(">>> [Logic] 进入推荐搜索...")
         payload = request.get_json(force=True, silent=True) or request.values.to_dict() or {}
-        print(f">>> 推荐 Payload: {payload}")
+        print(f">>> [Logic] 推荐 Payload: {payload}")
 
         keyword = payload.get('Keyword')
         size = payload.get('size', 10)
@@ -208,7 +220,7 @@ def search_recommended():
 
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"!!! SearchMusicRecommendedList Error:\n{error_trace}")
+        print(f"!!! [Error] SearchMusicRecommendedList 崩溃:\n{error_trace}")
         return response_json(code=500, msg=str(e))
 
 # if __name__ == '__main__':
