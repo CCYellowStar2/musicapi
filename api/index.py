@@ -19,6 +19,7 @@ MY_API_KEY = "114514"
 def response_json(data=None, code=200, msg="操作成功"):
     return jsonify({
         "code": code,
+        "message":msg,
         "data": data
     })
 
